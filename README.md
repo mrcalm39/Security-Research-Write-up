@@ -65,7 +65,7 @@ git clone https://github.com/mrcalm39/Security-Research-Write-up.git
 ### 2. Navigate to the Project Directory
 Change your terminal directory into the folder containing the lab files:
 ```bash
-cd YOUR_REPOSITORY_NAME
+cd Security-Research-Write-up
 ```
 
 ### 3. Build the Lab Container
