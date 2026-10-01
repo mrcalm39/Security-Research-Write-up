@@ -56,18 +56,29 @@ You can launch this fully functional application environment on your local machi
 ### Prerequisites
 Make sure you have [Docker Desktop](https://docker.com) installed and running on your machine.
 
-### 1. Build the Lab Container
-Open your terminal or command prompt inside this directory and execute:
+### 1. Clone the Repository
+Open your terminal or command prompt and clone this repository to your local machine:
 ```bash
-docker build -t stale-session-lab .
+git clone https://github.com
 ```
 
-### 2. Start the Lab Environment
-Run the container to expose the vulnerable application:
+### 2. Navigate to the Project Directory
+Change your terminal directory into the folder containing the lab files:
 ```bash
-docker run -p 5000:5000 stale-session-lab
+cd YOUR_REPOSITORY_NAME
 ```
 
-### 3. Access the Portal
+### 3. Build the Lab Container
+Build the Docker image using the customized **joeseclab** tag:
+```bash
+docker build -t joeseclab .
+```
+
+### 4. Start the Lab Environment
+Run the container to expose the vulnerable application locally:
+```bash
+docker run -p 5000:5000 joeseclab
+```
+
+### 5. Access the Portal
 Open your web browser and navigate to:
-
