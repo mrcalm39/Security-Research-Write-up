@@ -1,5 +1,6 @@
 import uuid
-from flask import Flask, request, make_response, redirect, url_for
+from flask import Flask, request, make_response, redirect, url_for, render_template_string
+
 
 app = Flask(__name__)
 
