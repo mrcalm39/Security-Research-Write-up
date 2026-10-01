@@ -43,3 +43,31 @@ Because the old session was not invalidated, an attacker possessing a stale cook
 The organization successfully resolved this issue by implementing the following controls:
 * **Global Session Revocation:** Enforced backend configurations to explicitly clear and invalidate all database/cache session identifiers associated with the User ID immediately upon a password reset execution.
 * **Re-Authentication Prompts:** Configured the application to actively challenge any remaining open windows to re-authenticate if their session state detects a mismatch with the updated user security stamp.
+
+
+
+
+---
+
+## 🚀 How to Run this Practical Lab Locally
+
+You can launch this fully functional application environment on your local machine using **Docker** to see the flaw in action.
+
+### Prerequisites
+Make sure you have [Docker Desktop](https://docker.com) installed and running on your machine.
+
+### 1. Build the Lab Container
+Open your terminal or command prompt inside this directory and execute:
+```bash
+docker build -t stale-session-lab .
+```
+
+### 2. Start the Lab Environment
+Run the container to expose the vulnerable application:
+```bash
+docker run -p 5000:5000 stale-session-lab
+```
+
+### 3. Access the Portal
+Open your web browser and navigate to:
+
