@@ -30,7 +30,7 @@ Make sure you have [Docker Desktop](https://docker.com) installed and running on
 ### 1. Clone the Repository
 Open your terminal or command prompt and clone this repository to your local machine:
 ```bash
-git clone https://github.com/mrcalm39/session-security-lab.git
+git clone https://github.com/mrcalm39/Security-Research-Write-up.git
 ```
 
 ### 2. Navigate to the Project Directory
