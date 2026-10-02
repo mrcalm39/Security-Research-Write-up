@@ -12,32 +12,52 @@ This lab is designed for cybersecurity students, penetration testers, and securi
 
 ---
 
-# Table of Contents
+# Installation
 
-- [About the Lab](#about-the-lab)
-- [Vulnerability](#vulnerability)
-- [Application Features](#application-features)
-- [Lab Architecture](#lab-architecture)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Running the Lab](#running-the-lab)
-- [Opening the Application](#opening-the-application)
-- [Creating an Account](#creating-an-account)
-- [Testing Login and Logout](#testing-login-and-logout)
-- [Testing Forgot Password](#testing-forgot-password)
-- [Reproducing the Vulnerability](#reproducing-the-vulnerability)
-- [Testing Ownership Transfer](#testing-ownership-transfer)
-- [Understanding the Vulnerability](#understanding-the-vulnerability)
-- [Expected Vulnerable Behavior](#expected-vulnerable-behavior)
-- [Expected Fixed Behavior](#expected-fixed-behavior)
-- [Security Fix](#security-fix)
-- [Stopping the Lab](#stopping-the-lab)
-- [Troubleshooting](#troubleshooting)
-- [Project Structure](#project-structure)
-- [Learning Objectives](#learning-objectives)
-- [Disclaimer](#disclaimer)
+The easiest way to run this lab is with Docker.
+
+The instructions below assume you are using Windows, Linux, or macOS and have Git and Docker installed.
 
 ---
+
+## 🚀 How to Run this Practical Lab Locally
+
+You can launch this fully functional application environment on your local machine using **Docker** to see the flaw in action.
+
+### Prerequisites
+Make sure you have [Docker Desktop](https://docker.com) installed and running on your machine.
+
+### 1. Clone the Repository
+Open your terminal or command prompt and clone this repository to your local machine:
+```bash
+git clone https://github.com/mrcalm39/session-security-lab.git
+```
+
+### 2. Navigate to the Project Directory
+Change your terminal directory into the folder containing the lab files:
+```bash
+cd session-security-lab
+```
+
+### 3. Build the Lab Container
+Build the Docker image using the customized **joeseclab** tag:
+```bash
+docker build -t joeseclab .
+```
+### 4. 
+
+### 5. Start the Lab Environment
+Run the container to expose the vulnerable application locally:
+```bash
+docker run -p 5000:5000 joeseclab
+```
+
+### 6. Access the Portal
+Open your web browser and navigate to:
+```
+http://localhost:5000
+
+
 
 # About the Lab
 
