@@ -21,37 +21,51 @@ It has two modes:
 
 Python is not required when using Docker.
 
-## Download
+## 🚀 How to Run this Practical Lab Locally
 
-Clone your GitHub repository:
+You can launch this fully functional application environment on your local machine using **Docker** to see the flaw in action.
 
+### Prerequisites
+Make sure you have [Docker Desktop](https://docker.com) installed and running on your machine.
+
+### 1. Clone the Repository
+Open your terminal or command prompt and clone this repository to your local machine:
 ```bash
-git clone https://github.com/YOUR_USERNAME/session-invalidation-lab.git
-cd session-invalidation-lab
+git clone https://github.com/mrcalm39/Security-Research-Write-up.git
 ```
 
-Or download the GitHub ZIP and extract it.
-
-## Build
-
+### 2. Navigate to the Project Directory
+Change your terminal directory into the folder containing the lab files:
 ```bash
-docker build -t session-invalidation-lab .
+cd session-reset-lab
 ```
 
-## Run vulnerable mode
-
+### 3. Build the Lab Container
+Build the Docker image using the customized **joeseclab** tag:
 ```bash
-docker run --name session-invalidation-lab \
+docker build -t session-reset-lab .
+```
+
+### 4. Run Fixed Mode
+Stop and remove the vulnerable container:
+```bash
+docker rm -f session-reset-lab
+```
+
+### 4. Run the Vulnerable Mode
+```bash
+docker run --name session-reset-lab \
   -p 5000:5000 \
   -e LAB_MODE=vulnerable \
-  session-invalidation-lab
+  session-reset-lab
 ```
 
-Open:
-
-```text
-http://127.0.0.1:5000
+### 5. Access the Portal
+Open your web browser and navigate to:
 ```
+http://localhost:5000
+```
+
 
 ## Default accounts
 
