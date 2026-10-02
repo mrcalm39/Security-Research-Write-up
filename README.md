@@ -1,84 +1,83 @@
-# Security-Research-Write-up
-Anonymized research detailing broken session management flaws and horizontal privilege escalation via persistent cookies.
+# Session Persistence After Password Reset — Security Lab
 
-# Lab: Broken Session Management (Stale Session Vulnerability)
+A deliberately vulnerable web application demonstrating a **session invalidation vulnerability following password reset**.
 
-## 📌 Executive Summary
-This repository contains anonymized security research detailing a critical **Broken Session Management** flaw discovered in a production web application. The application failed to invalidate active session identifiers following an account password reset initiated via the "forgotten password" flow. This logical flaw allowed an active session on a separate device to persist indefinitely, granting unauthorized access to deep administrative capabilities.
+This lab is designed for cybersecurity students, penetration testers, and security researchers who want to understand how an authenticated session can remain valid after an account's password has been changed.
 
----
-
-## 🔍 Vulnerability Profile
-* **Vulnerability Type:** Broken Session Management / Weak Session Invalidation
-* **Vulnerability Classification:** Insufficient Session Expiration (Stale Session)
-* **Severity:** **High** 🔴
-* **Impact:** Administrative Account Takeover (ATO) & Unauthorized Privilege Persistence
+> ⚠️ **Educational Use Only**
+>
+> This application is intentionally vulnerable. Run it only on your own computer, inside a lab environment, or on infrastructure where you have explicit authorization.
+>
+> Do not deploy this vulnerable version to a public-facing server.
 
 ---
 
-## 🕹️ Technical Breakdown & Scenario
-In a secure web architecture, executing a password change or recovery must destroy all active session tokens cached or stored across concurrent devices to isolate the account. 
+# Table of Contents
 
-In this application, while the password modification successfully updated the backend database, the session tracking layer failed to terminate or audit active cookies running on concurrent browsers.
-
-### Step-by-Step Replication Sequence
-1. **Initial Access:** A user session was established on **Device A**, keeping the application interface fully active.
-2. **Account Recovery Trigger:** On **Device B**, the user explicitly logged out, navigated to the login portal, and selected the **"Forgotten Password"** option.
-3. **Password Modification:** The user successfully completed the external reset verification link, updated their account password, and logged back in using the new credentials on **Device B**.
-4. **Vulnerability Verification:** Returning to **Device A** (which still held the pre-existing session token), the page was refreshed. 
-5. **Persistence Confirmed:** The application failed to drop the session or redirect to a login prompt. The stale session remained fully authenticated and operational.
-
----
-
-## ⚡ Business & Security Impact (Post-Exploitation)
-Because the old session was not invalidated, an attacker possessing a stale cookie maintained persistent, high-privilege access. On **Device A**, the session allowed full execution of administrative, high-impact tasks including:
-* **API Key Exploitation:** Generating new programmatic API keys to permanently drain or manipulate data via background scripts.
-* **Data Destruction:** Modifying and deleting critical application records.
-* **Access Expansion:** Inviting malicious external users to the organization platform.
-* **Complete Compromise:** Modifying and transferring account ownership, completely locking out the legitimate account owner.
-
----
-
-## 🛠️ Remediation Strategy
-The organization successfully resolved this issue by implementing the following controls:
-* **Global Session Revocation:** Enforced backend configurations to explicitly clear and invalidate all database/cache session identifiers associated with the User ID immediately upon a password reset execution.
-* **Re-Authentication Prompts:** Configured the application to actively challenge any remaining open windows to re-authenticate if their session state detects a mismatch with the updated user security stamp.
-
-
-
+- [About the Lab](#about-the-lab)
+- [Vulnerability](#vulnerability)
+- [Application Features](#application-features)
+- [Lab Architecture](#lab-architecture)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Running the Lab](#running-the-lab)
+- [Opening the Application](#opening-the-application)
+- [Creating an Account](#creating-an-account)
+- [Testing Login and Logout](#testing-login-and-logout)
+- [Testing Forgot Password](#testing-forgot-password)
+- [Reproducing the Vulnerability](#reproducing-the-vulnerability)
+- [Testing Ownership Transfer](#testing-ownership-transfer)
+- [Understanding the Vulnerability](#understanding-the-vulnerability)
+- [Expected Vulnerable Behavior](#expected-vulnerable-behavior)
+- [Expected Fixed Behavior](#expected-fixed-behavior)
+- [Security Fix](#security-fix)
+- [Stopping the Lab](#stopping-the-lab)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [Learning Objectives](#learning-objectives)
+- [Disclaimer](#disclaimer)
 
 ---
 
-## 🚀 How to Run this Practical Lab Locally
+# About the Lab
 
-You can launch this fully functional application environment on your local machine using **Docker** to see the flaw in action.
+This project reproduces a web application session-management vulnerability.
 
-### Prerequisites
-Make sure you have [Docker Desktop](https://docker.com) installed and running on your machine.
+The vulnerability occurs when a user changes their password through the account recovery process while an existing authenticated session remains active on another device.
 
-### 1. Clone the Repository
-Open your terminal or command prompt and clone this repository to your local machine:
-```bash
-git clone https://github.com/mrcalm39/Security-Research-Write-up.git
-```
+The vulnerable application fails to invalidate the old session.
 
-### 2. Navigate to the Project Directory
-Change your terminal directory into the folder containing the lab files:
-```bash
-cd Security-Research-Write-up
-```
+As a result:
 
-### 3. Build the Lab Container
-Build the Docker image using the customized **joeseclab** tag:
-```bash
-docker build -t joeseclab .
-```
+1. Device A logs into the application.
+2. Device B performs a password reset.
+3. The password is successfully changed.
+4. Device A still has the old authenticated session.
+5. Device A refreshes the page.
+6. Device A remains logged in.
 
-### 4. Start the Lab Environment
-Run the container to expose the vulnerable application locally:
-```bash
-docker run -p 5000:5000 joeseclab
-```
+A secure implementation should invalidate existing sessions after a security-sensitive account change such as a password reset.
 
-### 5. Access the Portal
-Open your web browser and navigate to:
+---
+
+# Vulnerability
+
+## Session Persistence After Password Reset
+
+The application intentionally demonstrates the following condition:
+
+```text
+Existing authenticated session
+          |
+          v
+Password reset occurs
+          |
+          v
+Password is changed
+          |
+          v
+Old session remains valid
+          |
+          v
+Previously authenticated device
+remains logged in
