@@ -74,7 +74,7 @@ As a result:
 3. The password is successfully changed.
 4. Device A still has the old authenticated session.
 5. Device A refreshes the page.
-6. Device A remains logged in.
+6. Device A remains logged in
 
 A secure implementation should invalidate existing sessions after a security-sensitive account change such as a password reset.
 
