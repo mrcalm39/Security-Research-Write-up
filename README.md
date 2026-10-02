@@ -1,14 +1,11 @@
-# PHPSESSID Session Invalidation Lab
+# Stale Session Management Lab
 
-A beginner-friendly Docker lab demonstrating **improper session invalidation after password reset**.
+A beginner-friendly Dockerized web-security lab demonstrating **improper session invalidation after password changes and logout**.
 
-## Learning goal
+This lab allows you to reproduce a stale-session vulnerability in a controlled local environment and compare the vulnerable behavior with a properly fixed implementation.
 
-The lab answers one question:
+The application intentionally contains two modes:
 
-> After a password reset, can an old authenticated `PHPSESSID` still access the account?
-
-It has two modes:
 
 - `vulnerable` — old sessions remain valid.
 - `fixed` — old sessions are revoked.
