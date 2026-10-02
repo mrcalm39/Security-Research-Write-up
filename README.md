@@ -43,19 +43,19 @@ cd session-security-lab
 Build the Docker image using the customized **joeseclab** tag:
 ```bash
 docker build -t joeseclab .
-```
-### 4. 
+``` 
 
-### 5. Start the Lab Environment
+### 4. Start the Lab Environment
 Run the container to expose the vulnerable application locally:
 ```bash
 docker run -p 5000:5000 joeseclab
 ```
 
-### 6. Access the Portal
+### 5. Access the Portal
 Open your web browser and navigate to:
 ```
 http://localhost:5000
+```
 
 
 
