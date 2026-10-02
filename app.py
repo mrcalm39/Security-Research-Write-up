@@ -1,1246 +1,872 @@
 import os
 import secrets
 import sqlite3
+import hashlib
 from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import (
     Flask,
-    flash,
-    g,
-    redirect,
-    render_template_string,
     request,
-    session,
+    redirect,
     url_for,
+    session,
+    render_template,
+    flash,
+    abort,
 )
-from werkzeug.security import check_password_hash, generate_password_hash
+
+
+# ============================================================
+# Configuration
+# ============================================================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "lab.db")
+
+# LAB_MODE:
+#   vulnerable -> old PHPSESSID remains valid after password reset
+#   fixed      -> old PHPSESSID is invalidated after password reset
+MODE = os.getenv("LAB_MODE", "fixed").lower()
+
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-change-me")
 
 
 app = Flask(__name__)
+app.secret_key = SECRET_KEY
 
-app.config["SECRET_KEY"] = os.environ.get(
-    "SECRET_KEY",
-    "local-development-secret-change-this"
+# IMPORTANT:
+# The lab intentionally uses PHPSESSID so the session cookie can
+# be observed and tested as part of the session-management lab.
+app.config.update(
+    SESSION_COOKIE_NAME="PHPSESSID",
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
 )
 
-DATABASE = os.environ.get("DATABASE", "lab.db")
-LAB_MODE = os.environ.get("LAB_MODE", "fixed").lower()
 
-if LAB_MODE not in ("fixed", "vulnerable"):
-    LAB_MODE = "fixed"
-
-
-# -------------------------------------------------------------------
+# ============================================================
 # Database
-# -------------------------------------------------------------------
+# ============================================================
 
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(exception=None):
-    db = g.pop("db", None)
-
-    if db is not None:
-        db.close()
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def init_db():
-    db = get_db()
+    conn = db()
 
-    db.executescript(
+    conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            is_owner INTEGER NOT NULL DEFAULT 0,
-            session_version INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
+            name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            reset_token TEXT,
+            reset_expires TEXT,
+            session_version INTEGER NOT NULL DEFAULT 1
         );
 
-        CREATE TABLE IF NOT EXISTS password_resets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
-            token TEXT UNIQUE NOT NULL,
-            expires_at TEXT NOT NULL,
-            used INTEGER NOT NULL DEFAULT 0,
+            version INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
 
-        CREATE TABLE IF NOT EXISTS invitations (
+        CREATE TABLE IF NOT EXISTS invites (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL,
-            token TEXT UNIQUE NOT NULL,
-            expires_at TEXT NOT NULL,
-            used INTEGER NOT NULL DEFAULT 0,
             invited_by INTEGER NOT NULL,
-            FOREIGN KEY(invited_by) REFERENCES users(id)
+            token TEXT UNIQUE NOT NULL,
+            accepted INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
         );
         """
     )
 
-    # Create demonstration owner account.
-    owner = db.execute(
-        "SELECT id FROM users WHERE email = ?",
-        ("owner@example.com",)
-    ).fetchone()
-
-    if owner is None:
-        db.execute(
-            """
-            INSERT INTO users
-            (email, password_hash, is_owner, session_version, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                "owner@example.com",
-                generate_password_hash("Password123!"),
-                1,
-                1,
-                datetime.utcnow().isoformat(),
-            ),
+    # Create initial lab accounts only when the database is empty.
+    if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+        add_user(
+            conn,
+            "alice@example.test",
+            "Alice",
+            "password123",
+            "owner",
         )
 
-    db.commit()
+        add_user(
+            conn,
+            "bob@example.test",
+            "Bob",
+            "password123",
+            "member",
+        )
+
+    conn.commit()
+    conn.close()
 
 
-# -------------------------------------------------------------------
-# Authentication
-# -------------------------------------------------------------------
+# ============================================================
+# Password helpers
+# ============================================================
 
-def current_user():
-    user_id = session.get("user_id")
-
-    if not user_id:
-        return None
-
-    db = get_db()
-
-    user = db.execute(
-        "SELECT * FROM users WHERE id = ?",
-        (user_id,)
-    ).fetchone()
-
-    if not user:
-        session.clear()
-        return None
-
-    # ---------------------------------------------------------------
-    # THE FIX
-    #
-    # Every authenticated session records the user's session_version.
-    # When the password is reset, session_version is incremented.
-    #
-    # In vulnerable mode this check is intentionally skipped so the
-    # old session remains authenticated.
-    # ---------------------------------------------------------------
-
-    if LAB_MODE == "fixed":
-
-        session_version = session.get("session_version")
-
-        if session_version != user["session_version"]:
-            session.clear()
-            return None
-
-    return user
+def hash_pw(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
-@app.context_processor
-def inject_user():
-    return {
-        "current_user": current_user(),
-        "lab_mode": LAB_MODE,
-    }
-
-
-def login_required(function):
-
-    @wraps(function)
-    def decorated(*args, **kwargs):
-
-        user = current_user()
-
-        if user is None:
-            flash("You must log in first.")
-            return redirect(url_for("login"))
-
-        return function(*args, **kwargs)
-
-    return decorated
-
-
-def owner_required(function):
-
-    @wraps(function)
-    def decorated(*args, **kwargs):
-
-        user = current_user()
-
-        if user is None:
-            return redirect(url_for("login"))
-
-        if not user["is_owner"]:
-            flash("Only the current owner can perform this action.")
-            return redirect(url_for("dashboard"))
-
-        return function(*args, **kwargs)
-
-    return decorated
-
-
-# -------------------------------------------------------------------
-# HTML
-# -------------------------------------------------------------------
-
-BASE_HTML = """
-<!doctype html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Session Security Lab</title>
-
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 950px;
-            margin: 40px auto;
-            padding: 0 20px;
-            background: #f5f7fa;
-            color: #222;
-        }
-
-        nav {
-            background: #111827;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 25px;
-        }
-
-        nav a {
-            color: white;
-            margin-right: 18px;
-            text-decoration: none;
-        }
-
-        .card {
-            background: white;
-            padding: 25px;
-            margin-bottom: 20px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,.08);
-        }
-
-        input {
-            width: 100%;
-            padding: 10px;
-            margin: 8px 0 15px;
-            box-sizing: border-box;
-        }
-
-        button {
-            background: #2563eb;
-            color: white;
-            border: 0;
-            padding: 10px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-        }
-
-        .danger {
-            background: #dc2626;
-        }
-
-        .success {
-            color: #15803d;
-        }
-
-        .warning {
-            background: #fff7ed;
-            border-left: 5px solid #f97316;
-            padding: 15px;
-        }
-
-        .fixed {
-            background: #ecfdf5;
-            border-left: 5px solid #16a34a;
-            padding: 15px;
-        }
-
-        code {
-            background: #eee;
-            padding: 2px 5px;
-            border-radius: 4px;
-        }
-
-        a {
-            color: #2563eb;
-        }
-    </style>
-</head>
-
-<body>
-
-<nav>
-    <a href="{{ url_for('index') }}">Home</a>
-
-    {% if current_user %}
-        <a href="{{ url_for('dashboard') }}">Dashboard</a>
-        <a href="{{ url_for('logout') }}">Logout</a>
-    {% else %}
-        <a href="{{ url_for('login') }}">Login</a>
-        <a href="{{ url_for('forgot_password') }}">Forgot Password</a>
-    {% endif %}
-</nav>
-
-{% with messages = get_flashed_messages() %}
-    {% for message in messages %}
-        <div class="card">
-            {{ message }}
-        </div>
-    {% endfor %}
-{% endwith %}
-
-{{ content|safe }}
-
-</body>
-</html>
-"""
-
-
-def render_page(content, **context):
-    return render_template_string(
-        BASE_HTML,
-        content=render_template_string(content, **context),
-        **context,
+def add_user(conn, email, name, password, role="member"):
+    conn.execute(
+        """
+        INSERT INTO users (
+            email,
+            name,
+            password_hash,
+            role
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            email,
+            name,
+            hash_pw(password),
+            role,
+        ),
     )
 
 
-# -------------------------------------------------------------------
+# ============================================================
+# Session handling
+# ============================================================
+
+def current_user():
+    """
+    Resolve the currently authenticated user.
+
+    The Flask session contains a random server-side session token.
+
+    PHPSESSID
+        |
+        v
+    Flask session
+        |
+        v
+    session_token
+        |
+        v
+    sessions table
+        |
+        v
+    user account
+
+    Vulnerable mode:
+        The session remains valid after a password reset.
+
+    Fixed mode:
+        Password reset invalidates the old server-side session.
+    """
+
+    token = session.get("session_token")
+
+    if not token:
+        return None
+
+    conn = db()
+
+    row = conn.execute(
+        """
+        SELECT
+            u.*,
+            s.version AS token_version
+        FROM sessions s
+        JOIN users u
+            ON u.id = s.user_id
+        WHERE s.token = ?
+        """,
+        (token,),
+    ).fetchone()
+
+    conn.close()
+
+    if not row:
+        # The server-side session no longer exists.
+        session.clear()
+        return None
+
+    # --------------------------------------------------------
+    # FIXED MODE
+    # --------------------------------------------------------
+    #
+    # Each session contains the user's session_version.
+    #
+    # Password reset increments the user's session_version and
+    # removes existing sessions.
+    #
+    # Therefore an old PHPSESSID can no longer authenticate.
+    #
+    if MODE == "fixed":
+        if row["token_version"] != row["session_version"]:
+            session.clear()
+            return None
+
+    # --------------------------------------------------------
+    # VULNERABLE MODE
+    # --------------------------------------------------------
+    #
+    # Nothing is checked here to invalidate the old session.
+    #
+    # If the PHPSESSID still maps to a valid session record,
+    # the user remains authenticated.
+    #
+    return row
+
+
+def login_user(user):
+    """
+    Create a new authenticated server-side session.
+
+    The browser receives a PHPSESSID cookie containing the
+    Flask session data, which references this server-side token.
+    """
+
+    token = secrets.token_urlsafe(32)
+
+    conn = db()
+
+    conn.execute(
+        """
+        INSERT INTO sessions (
+            token,
+            user_id,
+            version,
+            created_at
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            token,
+            user["id"],
+            user["session_version"],
+            datetime.utcnow().isoformat(),
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+    session.clear()
+
+    session["session_token"] = token
+
+
+def require_login(fn):
+    """
+    Authentication decorator.
+
+    Every protected endpoint calls current_user().
+
+    This is important for the lab because the vulnerability
+    exists when an old PHPSESSID still resolves to an
+    authenticated user.
+    """
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+
+        if not user:
+            flash("Please log in.")
+            return redirect(url_for("login"))
+
+        return fn(user, *args, **kwargs)
+
+    return wrapper
+
+
+# ============================================================
+# Template globals
+# ============================================================
+
+@app.context_processor
+def inject_globals():
+    return {
+        "mode": MODE,
+        "user": current_user(),
+    }
+
+
+# ============================================================
 # Home
-# -------------------------------------------------------------------
+# ============================================================
 
 @app.route("/")
 def index():
-
-    content = """
-    <div class="card">
-        <h1>Session Security Lab</h1>
-
-        <p>
-            This intentionally vulnerable/fixed application demonstrates
-            session invalidation after password reset.
-        </p>
-
-        {% if lab_mode == "vulnerable" %}
-            <div class="warning">
-                <strong>VULNERABLE MODE</strong><br>
-                Existing authenticated sessions are NOT invalidated
-                after password reset.
-            </div>
-        {% else %}
-            <div class="fixed">
-                <strong>FIXED MODE</strong><br>
-                Existing authenticated sessions are invalidated
-                after password reset.
-            </div>
-        {% endif %}
-
-        <h2>Demonstration account</h2>
-
-        <p>
-            Email:
-            <code>owner@example.com</code>
-        </p>
-
-        <p>
-            Password:
-            <code>Password123!</code>
-        </p>
-
-        <p>
-            This account is provided only for this local lab.
-        </p>
-    </div>
-    """
-
-    return render_page(content)
+    return render_template("index.html")
 
 
-# -------------------------------------------------------------------
+# ============================================================
 # Login
-# -------------------------------------------------------------------
+# ============================================================
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
 
     if request.method == "POST":
 
-        email = request.form.get("email", "").strip().lower()
-        password = request.form.get("password", "")
+        email = request.form["email"].strip().lower()
+        password = request.form["password"]
 
-        db = get_db()
+        conn = db()
 
-        user = db.execute(
-            "SELECT * FROM users WHERE email = ?",
-            (email,)
-        ).fetchone()
-
-        if user and check_password_hash(
-            user["password_hash"],
-            password
-        ):
-
-            session.clear()
-
-            session["user_id"] = user["id"]
-            session["session_version"] = user["session_version"]
-
-            flash("Login successful.")
-
-            return redirect(url_for("dashboard"))
-
-        flash("Invalid email or password.")
-
-    content = """
-    <div class="card">
-
-        <h1>Login</h1>
-
-        <form method="post">
-
-            <label>Email</label>
-            <input type="email" name="email" required>
-
-            <label>Password</label>
-            <input type="password" name="password" required>
-
-            <button type="submit">Login</button>
-
-        </form>
-
-        <p>
-            <a href="{{ url_for('forgot_password') }}">
-                Forgotten password?
-            </a>
-        </p>
-
-    </div>
-    """
-
-    return render_page(content)
-
-
-# -------------------------------------------------------------------
-# Logout
-# -------------------------------------------------------------------
-
-@app.route("/logout")
-def logout():
-
-    session.clear()
-
-    flash("You have been logged out.")
-
-    return redirect(url_for("login"))
-
-
-# -------------------------------------------------------------------
-# Dashboard
-# -------------------------------------------------------------------
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-
-    user = current_user()
-
-    content = """
-    <div class="card">
-
-        <h1>Dashboard</h1>
-
-        <p>
-            You are authenticated as:
-            <strong>{{ user["email"] }}</strong>
-        </p>
-
-        <p>
-            User ID:
-            <code>{{ user["id"] }}</code>
-        </p>
-
-        <p>
-            Session version:
-            <code>{{ user["session_version"] }}</code>
-        </p>
-
-        {% if user["is_owner"] %}
-            <p>
-                <strong>Role:</strong> Owner
-            </p>
-
-            <hr>
-
-            <h2>Owner functions</h2>
-
-            <p>
-                <a href="{{ url_for('invite') }}">
-                    Invite a user
-                </a>
-            </p>
-
-            <p>
-                <a href="{{ url_for('transfer_ownership') }}">
-                    Transfer ownership
-                </a>
-            </p>
-        {% else %}
-            <p>
-                <strong>Role:</strong> User
-            </p>
-        {% endif %}
-
-    </div>
-
-    <div class="card">
-
-        <h2>Password-reset security test</h2>
-
-        <p>
-            Open this application in two separate browser sessions.
-            Log in on Device A, then reset the password on Device B.
-        </p>
-
-        <p>
-            Refresh Device A to observe whether the old session remains
-            authenticated.
-        </p>
-
-    </div>
-    """
-
-    return render_page(content, user=user)
-
-
-# -------------------------------------------------------------------
-# Forgot password
-# -------------------------------------------------------------------
-
-@app.route("/forgot-password", methods=["GET", "POST"])
-def forgot_password():
-
-    if request.method == "POST":
-
-        email = request.form.get("email", "").strip().lower()
-
-        db = get_db()
-
-        user = db.execute(
-            "SELECT * FROM users WHERE email = ?",
-            (email,)
-        ).fetchone()
-
-        if user:
-
-            token = secrets.token_urlsafe(32)
-
-            expires = (
-                datetime.utcnow() + timedelta(minutes=30)
-            ).isoformat()
-
-            db.execute(
-                """
-                INSERT INTO password_resets
-                (user_id, token, expires_at)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    user["id"],
-                    token,
-                    expires,
-                ),
-            )
-
-            db.commit()
-
-            reset_url = url_for(
-                "reset_password",
-                token=token,
-                _external=True
-            )
-
-            content = """
-            <div class="card">
-
-                <h1>Password Reset Link</h1>
-
-                <p>
-                    In a real application this link would be sent
-                    through an external email service.
-                </p>
-
-                <p>
-                    For this local security lab, the reset link is
-                    displayed directly:
-                </p>
-
-                <p>
-                    <a href="{{ reset_url }}">
-                        {{ reset_url }}
-                    </a>
-                </p>
-
-            </div>
-            """
-
-            return render_page(
-                content,
-                reset_url=reset_url
-            )
-
-        flash(
-            "If that account exists, a reset link would be sent."
-        )
-
-    content = """
-    <div class="card">
-
-        <h1>Forgotten Password</h1>
-
-        <form method="post">
-
-            <label>Email address</label>
-
-            <input
-                type="email"
-                name="email"
-                required
-            >
-
-            <button type="submit">
-                Request password reset
-            </button>
-
-        </form>
-
-    </div>
-    """
-
-    return render_page(content)
-
-
-# -------------------------------------------------------------------
-# Password reset
-# -------------------------------------------------------------------
-
-@app.route("/reset-password/<token>", methods=["GET", "POST"])
-def reset_password(token):
-
-    db = get_db()
-
-    reset = db.execute(
-        """
-        SELECT *
-        FROM password_resets
-        WHERE token = ?
-        AND used = 0
-        """,
-        (token,)
-    ).fetchone()
-
-    if not reset:
-        return render_page(
-            "<div class='card'><h1>Invalid reset link</h1></div>"
-        )
-
-    if datetime.fromisoformat(
-        reset["expires_at"]
-    ) < datetime.utcnow():
-
-        return render_page(
-            "<div class='card'><h1>Reset link expired</h1></div>"
-        )
-
-    if request.method == "POST":
-
-        password = request.form.get("password", "")
-
-        if len(password) < 8:
-
-            flash(
-                "Password must contain at least 8 characters."
-            )
-
-            return redirect(
-                url_for(
-                    "reset_password",
-                    token=token
-                )
-            )
-
-        db.execute(
-            """
-            UPDATE users
-            SET password_hash = ?
-            WHERE id = ?
-            """,
-            (
-                generate_password_hash(password),
-                reset["user_id"],
-            ),
-        )
-
-        # -----------------------------------------------------------
-        # THE SECURITY FIX
-        #
-        # Incrementing this value invalidates every existing session.
-        #
-        # In vulnerable mode this increment is deliberately omitted.
-        # -----------------------------------------------------------
-
-        if LAB_MODE == "fixed":
-
-            db.execute(
-                """
-                UPDATE users
-                SET session_version = session_version + 1
-                WHERE id = ?
-                """,
-                (reset["user_id"],),
-            )
-
-        db.execute(
-            """
-            UPDATE password_resets
-            SET used = 1
-            WHERE id = ?
-            """,
-            (reset["id"],)
-        )
-
-        db.commit()
-
-        flash(
-            "Password changed successfully. "
-            "Existing sessions were invalidated."
-            if LAB_MODE == "fixed"
-            else
-            "Password changed successfully. "
-            "Existing sessions were NOT invalidated because "
-            "the lab is running in vulnerable mode."
-        )
-
-        return redirect(url_for("login"))
-
-    content = """
-    <div class="card">
-
-        <h1>Create New Password</h1>
-
-        <form method="post">
-
-            <label>New password</label>
-
-            <input
-                type="password"
-                name="password"
-                minlength="8"
-                required
-            >
-
-            <button type="submit">
-                Change password
-            </button>
-
-        </form>
-
-    </div>
-    """
-
-    return render_page(content)
-
-
-# -------------------------------------------------------------------
-# Invite user
-# -------------------------------------------------------------------
-
-@app.route("/invite", methods=["GET", "POST"])
-@owner_required
-def invite():
-
-    if request.method == "POST":
-
-        email = request.form.get(
-            "email",
-            ""
-        ).strip().lower()
-
-        if not email:
-
-            flash("Email address is required.")
-
-            return redirect(url_for("invite"))
-
-        db = get_db()
-
-        existing = db.execute(
-            "SELECT id FROM users WHERE email = ?",
-            (email,)
-        ).fetchone()
-
-        if existing:
-
-            flash("That user already exists.")
-
-            return redirect(url_for("invite"))
-
-        token = secrets.token_urlsafe(32)
-
-        expires = (
-            datetime.utcnow() + timedelta(hours=24)
-        ).isoformat()
-
-        inviter = current_user()
-
-        db.execute(
-            """
-            INSERT INTO invitations
-            (email, token, expires_at, invited_by)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                email,
-                token,
-                expires,
-                inviter["id"],
-            ),
-        )
-
-        db.commit()
-
-        invitation_url = url_for(
-            "accept_invitation",
-            token=token,
-            _external=True
-        )
-
-        content = """
-        <div class="card">
-
-            <h1>User Invitation</h1>
-
-            <p>
-                Invitation created for:
-                <strong>{{ email }}</strong>
-            </p>
-
-            <p>
-                Local lab invitation link:
-            </p>
-
-            <p>
-                <a href="{{ invitation_url }}">
-                    {{ invitation_url }}
-                </a>
-            </p>
-
-        </div>
-        """
-
-        return render_page(
-            content,
-            email=email,
-            invitation_url=invitation_url,
-        )
-
-    content = """
-    <div class="card">
-
-        <h1>Invite User</h1>
-
-        <form method="post">
-
-            <label>Email address</label>
-
-            <input
-                type="email"
-                name="email"
-                required
-            >
-
-            <button type="submit">
-                Create invitation
-            </button>
-
-        </form>
-
-    </div>
-    """
-
-    return render_page(content)
-
-
-# -------------------------------------------------------------------
-# Accept invitation
-# -------------------------------------------------------------------
-
-@app.route(
-    "/accept-invitation/<token>",
-    methods=["GET", "POST"]
-)
-def accept_invitation(token):
-
-    db = get_db()
-
-    invitation = db.execute(
-        """
-        SELECT *
-        FROM invitations
-        WHERE token = ?
-        AND used = 0
-        """,
-        (token,)
-    ).fetchone()
-
-    if not invitation:
-
-        return render_page(
-            "<div class='card'><h1>Invalid invitation</h1></div>"
-        )
-
-    if datetime.fromisoformat(
-        invitation["expires_at"]
-    ) < datetime.utcnow():
-
-        return render_page(
-            "<div class='card'><h1>Invitation expired</h1></div>"
-        )
-
-    if request.method == "POST":
-
-        password = request.form.get(
-            "password",
-            ""
-        )
-
-        if len(password) < 8:
-
-            flash(
-                "Password must contain at least 8 characters."
-            )
-
-            return redirect(
-                url_for(
-                    "accept_invitation",
-                    token=token
-                )
-            )
-
-        existing = db.execute(
-            "SELECT id FROM users WHERE email = ?",
-            (invitation["email"],)
-        ).fetchone()
-
-        if existing:
-
-            flash("User already exists.")
-
-            return redirect(url_for("login"))
-
-        cursor = db.execute(
-            """
-            INSERT INTO users
-            (email, password_hash, is_owner, session_version, created_at)
-            VALUES (?, ?, 0, 1, ?)
-            """,
-            (
-                invitation["email"],
-                generate_password_hash(password),
-                datetime.utcnow().isoformat(),
-            ),
-        )
-
-        db.execute(
-            """
-            UPDATE invitations
-            SET used = 1
-            WHERE id = ?
-            """,
-            (invitation["id"],)
-        )
-
-        db.commit()
-
-        session.clear()
-
-        session["user_id"] = cursor.lastrowid
-        session["session_version"] = 1
-
-        flash("Account created successfully.")
-
-        return redirect(url_for("dashboard"))
-
-    content = """
-    <div class="card">
-
-        <h1>Accept Invitation</h1>
-
-        <p>
-            Create a password for
-            <strong>{{ invitation["email"] }}</strong>
-        </p>
-
-        <form method="post">
-
-            <label>Password</label>
-
-            <input
-                type="password"
-                name="password"
-                minlength="8"
-                required
-            >
-
-            <button type="submit">
-                Create account
-            </button>
-
-        </form>
-
-    </div>
-    """
-
-    return render_page(
-        content,
-        invitation=invitation
-    )
-
-
-# -------------------------------------------------------------------
-# Ownership transfer
-# -------------------------------------------------------------------
-
-@app.route(
-    "/transfer-ownership",
-    methods=["GET", "POST"]
-)
-@owner_required
-def transfer_ownership():
-
-    db = get_db()
-
-    if request.method == "POST":
-
-        email = request.form.get(
-            "email",
-            ""
-        ).strip().lower()
-
-        target = db.execute(
+        user = conn.execute(
             """
             SELECT *
             FROM users
             WHERE email = ?
             """,
-            (email,)
+            (email,),
         ).fetchone()
 
-        if not target:
+        conn.close()
 
-            flash(
-                "That user does not exist."
-            )
+        if user and user["password_hash"] == hash_pw(password):
 
-            return redirect(
-                url_for("transfer_ownership")
-            )
+            login_user(user)
 
-        if target["id"] == current_user()["id"]:
+            return redirect(url_for("dashboard"))
 
-            flash(
-                "You are already the owner."
-            )
+        flash("Invalid email or password.")
 
-            return redirect(
-                url_for("transfer_ownership")
-            )
+    return render_template("login.html")
 
-        db.execute(
+
+# ============================================================
+# Logout
+# ============================================================
+
+@app.route("/logout", methods=["POST"])
+def logout():
+
+    token = session.get("session_token")
+
+    if token:
+
+        conn = db()
+
+        conn.execute(
             """
-            UPDATE users
-            SET is_owner = 0
-            WHERE id = ?
+            DELETE FROM sessions
+            WHERE token = ?
             """,
-            (current_user()["id"],)
+            (token,),
         )
 
-        db.execute(
-            """
-            UPDATE users
-            SET is_owner = 1
-            WHERE id = ?
-            """,
-            (target["id"],)
-        )
+        conn.commit()
+        conn.close()
 
-        db.commit()
+    session.clear()
 
-        session.clear()
+    flash("Logged out.")
 
-        flash(
-            "Ownership transferred successfully. "
-            "Your previous owner session has been logged out."
-        )
+    return redirect(url_for("index"))
 
-        return redirect(url_for("login"))
 
-    users = db.execute(
+# ============================================================
+# Dashboard
+# ============================================================
+
+@app.route("/dashboard")
+@require_login
+def dashboard(user):
+
+    conn = db()
+
+    users = conn.execute(
         """
-        SELECT email
+        SELECT
+            id,
+            name,
+            email,
+            role
         FROM users
-        WHERE id != ?
-        """,
-        (current_user()["id"],)
+        """
     ).fetchall()
 
-    content = """
-    <div class="card">
+    conn.close()
 
-        <h1>Transfer Ownership</h1>
-
-        {% if users %}
-
-            <form method="post">
-
-                <label>New owner</label>
-
-                <select name="email" required>
-
-                    {% for user in users %}
-
-                        <option value="{{ user["email"] }}">
-                            {{ user["email"] }}
-                        </option>
-
-                    {% endfor %}
-
-                </select>
-
-                <br><br>
-
-                <button
-                    class="danger"
-                    type="submit"
-                >
-                    Transfer ownership
-                </button>
-
-            </form>
-
-        {% else %}
-
-            <p>
-                No other users exist yet.
-                Invite another user first.
-            </p>
-
-        {% endif %}
-
-    </div>
-    """
-
-    return render_page(
-        content,
-        users=users
+    return render_template(
+        "dashboard.html",
+        users=users,
     )
 
 
-# -------------------------------------------------------------------
-# Security information
-# -------------------------------------------------------------------
+# ============================================================
+# Forgot password
+# ============================================================
 
-@app.route("/security")
-def security():
+@app.route("/forgot", methods=["GET", "POST"])
+def forgot():
 
-    content = """
-    <div class="card">
+    reset_url = None
 
-        <h1>Security Finding</h1>
+    if request.method == "POST":
 
-        <h2>Session Persistence After Password Reset</h2>
+        email = request.form["email"].strip().lower()
 
-        <p>
-            The vulnerable implementation allows an already-authenticated
-            session to remain valid after the account password is changed
-            from another device.
-        </p>
+        conn = db()
 
-        <h2>Expected Secure Behavior</h2>
+        user = conn.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE email = ?
+            """,
+            (email,),
+        ).fetchone()
 
-        <p>
-            Changing the password should invalidate previously issued
-            authentication sessions.
-        </p>
+        if user:
 
-        <h2>Remediation</h2>
+            token = secrets.token_urlsafe(24)
 
-        <p>
-            This lab uses a server-side
-            <code>session_version</code>.
-            The value is incremented after a password reset.
-            Existing sessions contain the previous value and therefore
-            become invalid.
-        </p>
+            expires = (
+                datetime.utcnow()
+                + timedelta(minutes=30)
+            ).isoformat()
 
-        <h2>Verification</h2>
+            conn.execute(
+                """
+                UPDATE users
+                SET
+                    reset_token = ?,
+                    reset_expires = ?
+                WHERE id = ?
+                """,
+                (
+                    token,
+                    expires,
+                    user["id"],
+                ),
+            )
 
-        <ol>
-            <li>Log in on Device A.</li>
-            <li>Leave Device A authenticated.</li>
-            <li>Open Device B.</li>
-            <li>Use Forgotten Password.</li>
-            <li>Change the password.</li>
-            <li>Return to Device A.</li>
-            <li>Refresh the dashboard.</li>
-        </ol>
+            conn.commit()
 
-        <p>
-            In vulnerable mode, Device A remains authenticated.
-            In fixed mode, Device A is redirected to login.
-        </p>
+            reset_url = url_for(
+                "reset_password",
+                token=token,
+                _external=True,
+            )
 
-    </div>
-    """
+        conn.close()
 
-    return render_page(content)
+        flash(
+            "If the account exists, a reset link "
+            "was generated for this lab."
+        )
+
+    return render_template(
+        "forgot.html",
+        reset_url=reset_url,
+    )
 
 
-# -------------------------------------------------------------------
+# ============================================================
+# Password reset
+# ============================================================
+
+@app.route("/reset/<token>", methods=["GET", "POST"])
+def reset_password(token):
+
+    conn = db()
+
+    user = conn.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE reset_token = ?
+        """,
+        (token,),
+    ).fetchone()
+
+    if (
+        not user
+        or not user["reset_expires"]
+        or datetime.fromisoformat(
+            user["reset_expires"]
+        ) < datetime.utcnow()
+    ):
+        conn.close()
+
+        abort(
+            400,
+            "Invalid or expired reset token.",
+        )
+
+    if request.method == "POST":
+
+        password = request.form["password"]
+
+        if len(password) < 8:
+
+            flash(
+                "Password must be at least 8 characters."
+            )
+
+            conn.close()
+
+            return render_template(
+                "reset.html"
+            )
+
+        # ====================================================
+        # FIXED IMPLEMENTATION
+        # ====================================================
+        #
+        # Password reset invalidates every previously issued
+        # authenticated session belonging to this account.
+        #
+        # This is the security fix.
+        #
+        if MODE == "fixed":
+
+            # Delete all existing authenticated sessions.
+            conn.execute(
+                """
+                DELETE FROM sessions
+                WHERE user_id = ?
+                """,
+                (user["id"],),
+            )
+
+            # Increase the session version.
+            #
+            # Any session created using the previous version
+            # is no longer valid.
+            conn.execute(
+                """
+                UPDATE users
+                SET session_version =
+                    session_version + 1
+                WHERE id = ?
+                """,
+                (user["id"],),
+            )
+
+        # ====================================================
+        # VULNERABLE IMPLEMENTATION
+        # ====================================================
+        #
+        # Deliberately DO NOT:
+        #
+        #   DELETE FROM sessions
+        #
+        # and DO NOT:
+        #
+        #   increment session_version
+        #
+        # Therefore an existing PHPSESSID remains associated
+        # with a valid authenticated session.
+        #
+        # This reproduces the session-persistence vulnerability.
+        #
+
+        conn.execute(
+            """
+            UPDATE users
+            SET
+                password_hash = ?,
+                reset_token = NULL,
+                reset_expires = NULL
+            WHERE id = ?
+            """,
+            (
+                hash_pw(password),
+                user["id"],
+            ),
+        )
+
+        conn.commit()
+        conn.close()
+
+        if MODE == "fixed":
+
+            flash(
+                "Password changed. "
+                "Existing sessions have been revoked."
+            )
+
+        else:
+
+            flash(
+                "Password changed. "
+                "Existing sessions remain valid "
+                "in vulnerable mode."
+            )
+
+        return redirect(url_for("login"))
+
+    conn.close()
+
+    return render_template(
+        "reset.html"
+    )
+
+
+# ============================================================
+# Invite user
+# ============================================================
+
+@app.route("/invite", methods=["GET", "POST"])
+@require_login
+def invite(user):
+
+    if request.method == "POST":
+
+        email = request.form["email"].strip().lower()
+
+        token = secrets.token_urlsafe(20)
+
+        conn = db()
+
+        conn.execute(
+            """
+            INSERT INTO invites (
+                email,
+                invited_by,
+                token,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                email,
+                user["id"],
+                token,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+
+        conn.commit()
+        conn.close()
+
+        invite_url = url_for(
+            "accept_invite",
+            token=token,
+            _external=True,
+        )
+
+        flash(
+            f"Lab invite created: {invite_url}"
+        )
+
+    return render_template(
+        "invite.html"
+    )
+
+
+# ============================================================
+# Accept invitation
+# ============================================================
+
+@app.route(
+    "/invite/<token>",
+    methods=["GET", "POST"],
+)
+def accept_invite(token):
+
+    conn = db()
+
+    inv = conn.execute(
+        """
+        SELECT *
+        FROM invites
+        WHERE token = ?
+          AND accepted = 0
+        """,
+        (token,),
+    ).fetchone()
+
+    conn.close()
+
+    if not inv:
+        abort(404)
+
+    if request.method == "POST":
+
+        email = inv["email"]
+        name = request.form["name"]
+        password = request.form["password"]
+
+        conn = db()
+
+        try:
+
+            add_user(
+                conn,
+                email,
+                name,
+                password,
+                "member",
+            )
+
+            conn.execute(
+                """
+                UPDATE invites
+                SET accepted = 1
+                WHERE id = ?
+                """,
+                (inv["id"],),
+            )
+
+            conn.commit()
+
+            flash(
+                "Invitation accepted. "
+                "You can now log in."
+            )
+
+            return redirect(
+                url_for("login")
+            )
+
+        except sqlite3.IntegrityError:
+
+            flash(
+                "That email already has an account."
+            )
+
+        finally:
+
+            conn.close()
+
+    return render_template(
+        "accept_invite.html",
+        invite=inv,
+    )
+
+
+# ============================================================
+# Ownership transfer
+# ============================================================
+
+@app.route(
+    "/transfer",
+    methods=["GET", "POST"],
+)
+@require_login
+def transfer(user):
+
+    # Only the current owner can transfer ownership.
+    #
+    # In vulnerable mode, the old PHPSESSID still resolves
+    # to this user after a password reset, so this check still
+    # succeeds.
+    if user["role"] != "owner":
+        abort(403)
+
+    conn = db()
+
+    members = conn.execute(
+        """
+        SELECT
+            id,
+            name,
+            email
+        FROM users
+        WHERE id != ?
+        """,
+        (user["id"],),
+    ).fetchall()
+
+    if request.method == "POST":
+
+        try:
+            target_id = int(
+                request.form["target_id"]
+            )
+        except (TypeError, ValueError):
+
+            conn.close()
+
+            abort(400)
+
+        target = conn.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE id = ?
+            """,
+            (target_id,),
+        ).fetchone()
+
+        if target:
+
+            # Remove owner role from current user.
+            conn.execute(
+                """
+                UPDATE users
+                SET role = "member"
+                WHERE id = ?
+                """,
+                (user["id"],),
+            )
+
+            # Give owner role to selected account.
+            conn.execute(
+                """
+                UPDATE users
+                SET role = "owner"
+                WHERE id = ?
+                """,
+                (target_id,),
+            )
+
+            conn.commit()
+
+            flash(
+                f'Ownership transferred to '
+                f'{target["email"]}.'
+            )
+
+            conn.close()
+
+            return redirect(
+                url_for("dashboard")
+            )
+
+    conn.close()
+
+    return render_template(
+        "transfer.html",
+        members=members,
+    )
+
+
+# ============================================================
 # Application startup
-# -------------------------------------------------------------------
-
-with app.app_context():
-    init_db()
-
+# ============================================================
 
 if __name__ == "__main__":
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            "5000"
-        )
+    init_db()
+
+    print(
+        f"Running session-reset lab "
+        f"in {MODE.upper()} mode"
+    )
+
+    print(
+        "Session cookie name: PHPSESSID"
     )
 
     app.run(
         host="0.0.0.0",
-        port=port,
-        debug=False
+        port=int(
+            os.getenv("PORT", 5000)
+        ),
+        debug=False,
     )
