@@ -1,22 +1,15 @@
-# Session Persistence After Password Reset — Security Lab
+# PHPSESSID Session Invalidation Lab
 
-A deliberately vulnerable web application demonstrating a **session invalidation vulnerability following password reset**.
+A Dockerized web security lab demonstrating improper session invalidation after a password reset.
 
-This lab is designed for cybersecurity students, penetration testers, and security researchers who want to understand how an authenticated session can remain valid after an account's password has been changed.
+The lab reproduces a session-management vulnerability where an existing authenticated session remains valid after the account password has been changed.
 
-> ⚠️ **Educational Use Only**
->
-> This application is intentionally vulnerable. Run it only on your own computer, inside a lab environment, or on infrastructure where you have explicit authorization.
->
-> Do not deploy this vulnerable version to a public-facing server.
+The application provides two modes:
 
----
+- `vulnerable` — demonstrates the insecure behavior
+- `fixed` — demonstrates the security fix
 
-# Installation
-
-The easiest way to run this lab is with Docker.
-
-The instructions below assume you are using Windows, Linux, or macOS and have Git and Docker installed.
+The lab is intended for authorized security research, application-security training, and portfolio demonstrations.
 
 ---
 
@@ -36,19 +29,27 @@ git clone https://github.com/mrcalm39/Security-Research-Write-up.git
 ### 2. Navigate to the Project Directory
 Change your terminal directory into the folder containing the lab files:
 ```bash
-cd session-security-lab
+cd session-reset-lab
 ```
 
 ### 3. Build the Lab Container
 Build the Docker image using the customized **joeseclab** tag:
 ```bash
-docker build -t joeseclab .
-``` 
+docker build -t session-reset-lab .
+```
 
-### 4. Start the Lab Environment
-Run the container to expose the vulnerable application locally:
+### 4. Run Fixed Mode
+Stop and remove the vulnerable container:
 ```bash
-docker run -p 5000:5000 joeseclab
+docker rm -f session-reset-lab
+```
+
+### 4. Run the Vulnerable Mode
+```bash
+docker run --name session-reset-lab \
+  -p 5000:5000 \
+  -e LAB_MODE=vulnerable \
+  session-reset-lab
 ```
 
 ### 5. Access the Portal
@@ -58,46 +59,35 @@ http://localhost:5000
 ```
 
 
+## Vulnerability Overview
 
-# About the Lab
+The vulnerability occurs when a user changes their password but previously issued authenticated sessions are not invalidated.
 
-This project reproduces a web application session-management vulnerability.
-
-The vulnerability occurs when a user changes their password through the account recovery process while an existing authenticated session remains active on another device.
-
-The vulnerable application fails to invalidate the old session.
-
-As a result:
-
-1. Device A logs into the application.
-2. Device B performs a password reset.
-3. The password is successfully changed.
-4. Device A still has the old authenticated session.
-5. Device A refreshes the page.
-6. Device A remains logged in
-
-A secure implementation should invalidate existing sessions after a security-sensitive account change such as a password reset.
-
----
-
-# Vulnerability
-
-## Session Persistence After Password Reset
-
-The application intentionally demonstrates the following condition:
+For example:
 
 ```text
+Victim logs in
+      |
+      v
+PHPSESSID = SESSION_A
+      |
+      v
 Existing authenticated session
-          |
-          v
-Password reset occurs
-          |
-          v
-Password is changed
-          |
-          v
-Old session remains valid
-          |
-          v
-Previously authenticated device
-remains logged in
+      |
+      +-----------------------------+
+      |                             |
+      | Password is changed         |
+      |                             |
+      v                             |
+New password is created             |
+                                    |
+                                    v
+                         SESSION_A remains valid
+                                    |
+                                    v
+                         Old session is still
+                         authenticated
+                                    |
+                                    v
+                         Authorized actions
+                         can still be performed
